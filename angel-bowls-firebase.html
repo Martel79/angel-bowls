@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Angel Indoor Bowls – Men's Selectors' Portal</title>
+
+<!-- Firebase v9 compat (works as plain script tags, no build tools needed) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
+<!-- React -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=Source+Sans+3:wght@300;400;500;600&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:#0f172a;color:#e2e8f0;font-family:'Source Sans 3',sans-serif;min-height:100vh}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:#1e293b}
+::-webkit-scrollbar-thumb{background:#475569;border-radius:3px}
+select option{background:#1e293b;color:#e2e8f0}
+.toast{position:fixed;bottom:24px;right:24px;background:#10b981;color:#fff;padding:10px 18px;
+  border-radius:12px;font-size:13px;font-weight:600;z-index:9999;
+  animation:slideIn .3s ease;box-shadow:0 4px 20px rgba(16,185,129,.4);max-width:300px;line-height:1.4}
+.toast.error{background:#ef4444;box-shadow:0 4px 20px rgba(239,68,68,.4)}
+.toast.info{background:#3b82f6;box-shadow:0 4px 20px rgba(59,130,246,.4)}
+@keyframes slideIn{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.fade-in{animation:fadeIn .25s ease}
+input[type=date]::-webkit-calendar-picker-indicator{filter:invert(0.7)}
+.sync-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px;flex-shrink:0}
+.sync-dot.ok{background:#10b981}
+.sync-dot.busy{background:#f59e0b;animation:pulse 1s infinite}
+.sync-dot.err{background:#ef4444}
+.sync-dot.offline{background:#64748b}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+/* Setup wizard */
+.setup-overlay{position:fixed;inset:0;background:#0f172a;z-index:100;display:flex;
+  align-items:flex-start;justify-content:center;overflow-y:auto;padding:20px}
+.setup-card{background:#1e293b;border:1px solid #334155;border-radius:20px;
+  padding:32px;width:100%;max-width:620px;margin:auto}
+.setup-card h1{font-family:'Playfair Display',serif;color:#f59e0b;font-size:24px;margin-bottom:6px}
+.setup-card h2{font-family:'Playfair Display',serif;color:#f1f5f9;font-size:18px;margin:20px 0 10px}
+.step{background:#0f172a;border:1px solid #334155;border-radius:12px;padding:16px;margin-bottom:12px}
+.step-num{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;
+  background:#f59e0b;color:#0f172a;border-radius:50%;font-size:12px;font-weight:800;margin-right:8px;flex-shrink:0}
+.step-title{display:flex;align-items:center;color:#f1f5f9;font-weight:600;font-size:14px;margin-bottom:8px}
+.step p,.step li{font-size:13px;color:#94a3b8;line-height:1.6;margin-bottom:4px}
+.step ul{padding-left:20px}
+.step code{background:#334155;color:#f59e0b;padding:1px 6px;border-radius:4px;font-size:12px;font-family:monospace}
+.cfg-input{width:100%;background:#334155;color:#f1f5f9;border:1px solid #475569;border-radius:8px;
+  padding:8px 12px;font-size:12px;font-family:monospace;outline:none;margin-top:6px}
+.cfg-input:focus{border-color:#f59e0b}
+.cfg-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;margin-top:10px;display:block}
+a.lnk{color:#f59e0b;text-decoration:none}
+a.lnk:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useMemo, useEffect, useRef } = React;
+
+// ═══════════════════════════════════════════════════════════════
+//  FIREBASE CONFIG  ← user fills this in via Setup Wizard
+// ═══════════════════════════════════════════════════════════════
+const CONFIG_KEY = "aibc_firebase_config";
+
+function loadConfig(){
+  try{ const v=localStorage.getItem(CONFIG_KEY); return v?JSON.parse(v):null; }catch{ return null; }
+}
+function saveConfig(cfg){
+  try{ localStorage.setItem(CONFIG_KEY,JSON.stringify(cfg)); }catch{}
+}
+
+// ── DB singleton ──────────────────────────────────────────────
+let _db = null;
+function getDb(cfg){
+  if(_db) return _db;
+  if(!cfg) return null;
+  try{
+    const app = firebase.apps.length
+      ? firebase.app()
+      : firebase.initializeApp(cfg);
+    _db = firebase.firestore(app);
+    return _db;
+  } catch(e){ console.error("Firebase init failed",e); return null; }
+}
+
+// Firestore helpers — store everything in a single "portal" collection
+// doc "matches"  → { items: [...] }
+// doc "players"  → { items: [...] }
+// doc "meta"     → { nextId: N }
+async function dbGet(db, docId){
+  const snap = await db.collection("portal").doc(docId).get();
+  return snap.exists ? snap.data() : null;
+}
+async function dbSet(db, docId, data){
+  await db.collection("portal").doc(docId).set(data);
+}
+
+// ── Constants ────────────────────────────────────────────────
+const COMPETITIONS = [
+  "KCIBA Singles","KCIBA Pairs","KCIBA Triples","KCIBA Fours",
+  "EIBA Singles","EIBA Pairs","EIBA Triples","EIBA Fours",
+  "Club League","Friendly"
+];
+const FORMATS  = ["Singles","Pairs","Triples","Fours"];
+const VENUES   = ["Home","Away","Neutral"];
+const RESULTS  = ["Win","Loss","Draw"];
+const POSITIONS = {
+  Singles:["Lead"], Pairs:["Lead","Skip"],
+  Triples:["Lead","Second","Skip"], Fours:["Lead","Second","Third","Skip"]
+};
+const POS_BTNS = [
+  {key:"L",label:"L",full:"Lead"},{key:"2",label:"2",full:"Second"},
+  {key:"3",label:"3",full:"Third"},{key:"S",label:"S",full:"Skip"},
+];
+
+const SEED_PLAYERS = [
+  {name:"Alan Marsh",preferredPos:["L"]},{name:"Bob Fletcher",preferredPos:["S"]},
+  {name:"Colin Reed",preferredPos:["L","2"]},{name:"Dave Hughes",preferredPos:["2"]},
+  {name:"Eric Stone",preferredPos:["S"]},{name:"Frank Norris",preferredPos:["L"]},
+  {name:"George Tillett",preferredPos:["3"]},{name:"Harry Webb",preferredPos:["2","3"]},
+  {name:"Ian Prentice",preferredPos:["2","3"]},{name:"Jack Morrison",preferredPos:["S"]},
+];
+const SEED_MATCHES = [
+  {id:1,competition:"KCIBA Pairs",format:"Pairs",date:"2025-10-12",venue:"Home",opposition:"Gillingham IBC",result:"Win",score:"21-14",players:[{name:"Alan Marsh",position:"Lead"},{name:"Bob Fletcher",position:"Skip"}]},
+  {id:2,competition:"KCIBA Pairs",format:"Pairs",date:"2025-10-19",venue:"Away",opposition:"Maidstone IBC",result:"Loss",score:"15-21",players:[{name:"Alan Marsh",position:"Lead"},{name:"Bob Fletcher",position:"Skip"}]},
+  {id:3,competition:"KCIBA Triples",format:"Triples",date:"2025-11-02",venue:"Home",opposition:"Canterbury IBC",result:"Win",score:"18-12",players:[{name:"Colin Reed",position:"Lead"},{name:"Dave Hughes",position:"Second"},{name:"Eric Stone",position:"Skip"}]},
+  {id:4,competition:"KCIBA Fours",format:"Fours",date:"2025-11-09",venue:"Away",opposition:"Folkestone IBC",result:"Win",score:"22-19",players:[{name:"Frank Norris",position:"Lead"},{name:"George Tillett",position:"Second"},{name:"Harry Webb",position:"Third"},{name:"Ian Prentice",position:"Skip"}]},
+  {id:5,competition:"EIBA Pairs",format:"Pairs",date:"2025-11-16",venue:"Neutral",opposition:"Brighton IBC",result:"Loss",score:"14-21",players:[{name:"Jack Morrison",position:"Lead"},{name:"Alan Marsh",position:"Skip"}]},
+  {id:6,competition:"KCIBA Singles",format:"Singles",date:"2025-11-23",venue:"Home",opposition:"Sittingbourne IBC",result:"Win",score:"21-10",players:[{name:"Bob Fletcher",position:"Lead"}]},
+  {id:7,competition:"KCIBA Pairs",format:"Pairs",date:"2025-12-07",venue:"Home",opposition:"Tonbridge IBC",result:"Win",score:"21-18",players:[{name:"Colin Reed",position:"Lead"},{name:"Dave Hughes",position:"Skip"}]},
+  {id:8,competition:"KCIBA Fours",format:"Fours",date:"2025-12-14",venue:"Away",opposition:"Gillingham IBC",result:"Loss",score:"17-21",players:[{name:"Eric Stone",position:"Lead"},{name:"Frank Norris",position:"Second"},{name:"George Tillett",position:"Third"},{name:"Harry Webb",position:"Skip"}]},
+  {id:9,competition:"EIBA Triples",format:"Triples",date:"2026-01-11",venue:"Neutral",opposition:"Portsmouth IBC",result:"Win",score:"19-15",players:[{name:"Ian Prentice",position:"Lead"},{name:"Jack Morrison",position:"Second"},{name:"Alan Marsh",position:"Skip"}]},
+  {id:10,competition:"KCIBA Triples",format:"Triples",date:"2026-01-18",venue:"Away",opposition:"Maidstone IBC",result:"Win",score:"20-16",players:[{name:"Bob Fletcher",position:"Lead"},{name:"Colin Reed",position:"Second"},{name:"Dave Hughes",position:"Skip"}]},
+];
+
+// ── Colours ──────────────────────────────────────────────────
+const C={
+  sl900:"#0f172a",sl800:"#1e293b",sl700:"#334155",sl600:"#475569",
+  sl500:"#64748b",sl400:"#94a3b8",sl300:"#cbd5e1",sl200:"#e2e8f0",sl100:"#f1f5f9",
+  amber:"#800020",amberLo:"rgba(128,0,32,.12)",amberBd:"rgba(128,0,32,.35)",
+  emerald:"#10b981",emeraldLo:"rgba(16,185,129,.1)",emeraldBd:"rgba(16,185,129,.25)",
+  rose:"#f43f5e",roseLo:"rgba(244,63,94,.1)",roseBd:"rgba(244,63,94,.25)",blue:"#3b82f6",
+};
+
+// ── Helpers ──────────────────────────────────────────────────
+function pct(w,t){return t===0?"—":Math.round((w/t)*100)+"%"}
+function winClr(val){
+  if(val==="—") return C.sl500;
+  const n=parseInt(val);
+  if(n>=60) return C.emerald; if(n>=40) return "#f59e0b"; return C.rose;
+}
+function normPos(p){ if(!p||p==="—") return []; if(Array.isArray(p)) return p; return [p]; }
+
+function buildStats(matches){
+  const s={};
+  matches.forEach(m=>{
+    m.players.forEach(p=>{
+      if(!s[p.name]) s[p.name]={total:0,wins:0,home:{w:0,t:0},away:{w:0,t:0},neutral:{w:0,t:0},positions:{},partners:{}};
+      const st=s[p.name]; const win=m.result==="Win";
+      st.total++; if(win)st.wins++;
+      const vk=m.venue.toLowerCase(); st[vk].t++; if(win)st[vk].w++;
+      if(!st.positions[p.position])st.positions[p.position]={w:0,t:0};
+      st.positions[p.position].t++; if(win)st.positions[p.position].w++;
+      m.players.filter(x=>x.name!==p.name).forEach(q=>{
+        if(!st.partners[q.name])st.partners[q.name]={w:0,t:0};
+        st.partners[q.name].t++; if(win)st.partners[q.name].w++;
+      });
+    });
+  });
+  return s;
+}
+
+// ── CSV ──────────────────────────────────────────────────────
+function dlCSV(filename,rows){
+  const csv=rows.map(r=>r.map(c=>`"${String(c??'').replace(/"/g,'""')}"`).join(",")).join("\n");
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download=filename; a.click();
+}
+const posLabel=k=>POS_BTNS.find(b=>b.key===k)?.full||k;
+function exportMatches(m){
+  dlCSV("angel_matches.csv",[
+    ["ID","Date","Competition","Format","Venue","Opposition","Result","Score","Players","Positions"],
+    ...m.map(x=>[x.id,x.date,x.competition,x.format,x.venue,x.opposition,x.result,x.score,
+      x.players.map(p=>p.name).join(" | "),x.players.map(p=>p.position).join(" | ")])
+  ]);
+}
+function exportSquad(pl){
+  dlCSV("angel_squad.csv",[["Name","Preferred Positions"],
+    ...pl.map(p=>[p.name,normPos(p.preferredPos).map(posLabel).join(", ")||"—"])]);
+}
+function exportStats(matches,players){
+  const stats=buildStats(matches);
+  dlCSV("angel_player_stats.csv",[
+    ["Player","Preferred","Total","Wins","Win%","Home W","Home T","Home%","Away W","Away T","Away%",
+     "Lead W","Lead T","Lead%","Second W","Second T","Second%","Third W","Third T","Third%","Skip W","Skip T","Skip%"],
+    ...players.map(pl=>{
+      const s=stats[pl.name]||{total:0,wins:0,home:{w:0,t:0},away:{w:0,t:0},neutral:{w:0,t:0},positions:{}};
+      const pd=["Lead","Second","Third","Skip"].flatMap(pos=>{const d=s.positions[pos]||{w:0,t:0};return[d.w,d.t,pct(d.w,d.t)]});
+      return[pl.name,normPos(pl.preferredPos).map(posLabel).join(", ")||"—",
+        s.total,s.wins,pct(s.wins,s.total),s.home.w,s.home.t,pct(s.home.w,s.home.t),
+        s.away.w,s.away.t,pct(s.away.w,s.away.t),...pd];
+    })
+  ]);
+}
+function exportDashboard(matches){
+  const total=matches.length,wins=matches.filter(m=>m.result==="Win").length;
+  const losses=matches.filter(m=>m.result==="Loss").length,draws=matches.filter(m=>m.result==="Draw").length;
+  const hW=matches.filter(m=>m.venue==="Home"&&m.result==="Win").length,hT=matches.filter(m=>m.venue==="Home").length;
+  const aW=matches.filter(m=>m.venue==="Away"&&m.result==="Win").length,aT=matches.filter(m=>m.venue==="Away").length;
+  const nW=matches.filter(m=>m.venue==="Neutral"&&m.result==="Win").length,nT=matches.filter(m=>m.venue==="Neutral").length;
+  const byComp={};
+  matches.forEach(m=>{if(!byComp[m.competition])byComp[m.competition]={w:0,t:0};byComp[m.competition].t++;if(m.result==="Win")byComp[m.competition].w++;});
+  dlCSV("angel_dashboard.csv",[
+    ["ANGEL INDOOR BOWLS – SELECTORS' PORTAL","",""],["Generated",new Date().toLocaleDateString("en-GB"),""],["","",""],
+    ["OVERALL","",""],["Matches",total,""],["Wins",wins,pct(wins,total)],["Losses",losses,""],["Draws",draws,""],["","",""],
+    ["VENUE","Wins/Played","Win%"],["Home",`${hW}/${hT}`,pct(hW,hT)],["Away",`${aW}/${aT}`,pct(aW,aT)],["Neutral",`${nW}/${nT}`,pct(nW,nT)],["","",""],
+    ["COMPETITION","Wins/Played","Win%"],
+    ...Object.entries(byComp).map(([c,v])=>[c,`${v.w}/${v.t}`,pct(v.w,v.t)])
+  ]);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SETUP WIZARD
+// ═══════════════════════════════════════════════════════════════
+function SetupWizard({onComplete}){
+  const blank={apiKey:"",authDomain:"",projectId:"",storageBucket:"",messagingSenderId:"",appId:""};
+  const [cfg,setCfg]=useState(blank);
+  const [err,setErr]=useState("");
+  const [testing,setTesting]=useState(false);
+
+  const fields=[
+    ["apiKey","API Key","AIzaSy…"],
+    ["authDomain","Auth Domain","your-project.firebaseapp.com"],
+    ["projectId","Project ID","your-project-id"],
+    ["storageBucket","Storage Bucket","your-project.appspot.com"],
+    ["messagingSenderId","Messaging Sender ID","123456789012"],
+    ["appId","App ID","1:123…:web:abc…"],
+  ];
+
+  async function test(){
+    setErr(""); setTesting(true);
+    try{
+      if(!cfg.projectId||!cfg.apiKey){ setErr("Please fill in all fields."); setTesting(false); return; }
+      // Try init Firebase
+      if(firebase.apps.length) firebase.apps.forEach(a=>a.delete());
+      _db=null;
+      const app=firebase.initializeApp(cfg);
+      const db=firebase.firestore(app);
+      // Try a test write/read
+      await db.collection("portal").doc("_test").set({ok:true,ts:Date.now()});
+      await db.collection("portal").doc("_test").delete();
+      saveConfig(cfg);
+      setTesting(false);
+      onComplete(cfg);
+    } catch(e){
+      setErr("Connection failed: "+e.message);
+      setTesting(false);
+    }
+  }
+
+  return(
+    <div className="setup-overlay">
+      <div className="setup-card">
+        <h1><svg width="28" height="28" viewBox="0 0 28 28" style={{verticalAlign:"middle",marginRight:8}}><defs><radialGradient id="bg0" cx="35%" cy="30%" r="65%"><stop offset="0%" stopColor="#c0304a"/><stop offset="55%" stopColor="#800020"/><stop offset="100%" stopColor="#3d0010"/></radialGradient><filter id="bs0"><feDropShadow dx="1" dy="2" stdDeviation="2" floodColor="#000" floodOpacity="0.45"/></filter></defs><ellipse cx="14" cy="15" rx="11" ry="10" fill="url(#bg0)" filter="url(#bs0)"/><ellipse cx="10" cy="18" rx="3.5" ry="2" fill="rgba(255,255,255,0.12)"/><ellipse cx="10.5" cy="11" rx="4" ry="2.5" fill="rgba(255,255,255,0.18)"/><circle cx="17" cy="17" r="2.2" fill="rgba(255,255,255,0.22)" stroke="rgba(255,255,255,0.35)" strokeWidth="0.5"/></svg>Men's Selectors' Portal</h1>
+        <p style={{fontSize:13,color:C.sl400,marginBottom:4}}>Angel Indoor Bowls Club</p>
+        <p style={{fontSize:13,color:C.sl300,marginTop:12,lineHeight:1.6}}>
+          This portal stores all match and squad data in <strong style={{color:C.amber}}>Google Firebase</strong> — a free cloud database.
+          Once set up, any device with this file can access and edit the same shared data.
+          Follow the steps below (takes about 5 minutes).
+        </p>
+
+        <h2>Step-by-step setup</h2>
+
+        <div className="step">
+          <div className="step-title"><span className="step-num">1</span>Create a free Firebase project</div>
+          <p>Go to <a className="lnk" href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a> and sign in with your Google account.</p>
+          <p>Click <strong>Add project</strong>, name it <code>angel-bowls</code>, disable Google Analytics (not needed), then click <strong>Create project</strong>.</p>
+        </div>
+
+        <div className="step">
+          <div className="step-title"><span className="step-num">2</span>Create a Firestore database</div>
+          <p>In the left sidebar click <strong>Build → Firestore Database</strong>, then <strong>Create database</strong>.</p>
+          <p>Choose <strong>Start in production mode</strong>, pick <strong>europe-west2 (London)</strong> as your region, and click <strong>Enable</strong>.</p>
+        </div>
+
+        <div className="step">
+          <div className="step-title"><span className="step-num">3</span>Set security rules (allow club access)</div>
+          <p>In Firestore, click the <strong>Rules</strong> tab. Replace the rules with:</p>
+          <pre style={{background:"#0f172a",border:"1px solid #334155",borderRadius:8,padding:12,
+            fontSize:11,color:"#f59e0b",overflowX:"auto",marginTop:6,lineHeight:1.7}}>
+{`rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}`}
+          </pre>
+          <p style={{marginTop:6}}>Click <strong>Publish</strong>. <em>(This allows anyone with the config to access the data — suitable for a private club file. You can tighten this later.)</em></p>
+        </div>
+
+        <div className="step">
+          <div className="step-title"><span className="step-num">4</span>Register a Web App &amp; get your config</div>
+          <p>In the Firebase console, click the ⚙️ gear icon → <strong>Project settings</strong>.</p>
+          <p>Scroll to <strong>Your apps</strong>, click the <strong>&lt;/&gt;</strong> (Web) icon, name it <code>selectors-portal</code>, and click <strong>Register app</strong>.</p>
+          <p>You'll see a <code>firebaseConfig</code> object with several values. Copy each value into the fields below.</p>
+        </div>
+
+        <div className="step">
+          <div className="step-title"><span className="step-num">5</span>Paste your config values below</div>
+          {fields.map(([key,label,ph])=>(
+            <div key={key}>
+              <span className="cfg-label">{label}</span>
+              <input className="cfg-input" placeholder={ph} value={cfg[key]}
+                onChange={e=>setCfg(c=>({...c,[key]:e.target.value.trim()}))}/>
+            </div>
+          ))}
+          {err&&<p style={{color:C.rose,fontSize:12,marginTop:10}}>⚠ {err}</p>}
+          <div style={{display:"flex",gap:10,marginTop:16}}>
+            <button onClick={test} disabled={testing}
+              style={{background:C.amber,color:"#ffffff",border:"none",borderRadius:10,
+                padding:"10px 22px",fontWeight:700,fontSize:14,cursor:testing?"not-allowed":"pointer",opacity:testing?.6:1}}>
+              {testing?"Testing connection…":"Save & Connect"}
+            </button>
+          </div>
+          <p style={{fontSize:11,color:C.sl600,marginTop:10}}>
+            Your config is saved only in this browser's local storage — it is never sent anywhere else.
+            Share this .html file with other selectors; they each enter the same config once on their own device.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  UI COMPONENTS  (shared)
+// ═══════════════════════════════════════════════════════════════
+function Toast({msg,type,onDone}){
+  useEffect(()=>{const t=setTimeout(onDone,3500);return()=>clearTimeout(t);},[]);
+  return <div className={`toast${type==="error"?" error":type==="info"?" info":""}`}>{msg}</div>;
+}
+function SyncStatus({status}){
+  const map={ok:{cls:"ok",txt:"Synced to Firebase"},busy:{cls:"busy",txt:"Saving…"},
+    err:{cls:"err",txt:"Save failed – retry pending"},offline:{cls:"offline",txt:"Offline – using local cache"}};
+  const s=map[status]||map.ok;
+  return <span style={{fontSize:10,color:C.sl500,display:"flex",alignItems:"center",gap:0}}>
+    <span className={`sync-dot ${s.cls}`}/>{s.txt}</span>;
+}
+function Btn({children,onClick,variant="primary",small=false,disabled=false,title=""}){
+  const base={borderRadius:10,fontWeight:600,cursor:disabled?"not-allowed":"pointer",border:"none",
+    fontSize:small?11:13,padding:small?"5px 10px":"8px 16px",transition:"all .15s",opacity:disabled?.5:1,fontFamily:"inherit"};
+  const v={primary:{background:C.amber,color:"#ffffff"},secondary:{background:C.sl700,color:C.sl300},
+    export:{background:C.amberLo,color:C.amber,border:`1px solid ${C.amberBd}`},
+    danger:{background:C.roseLo,color:C.rose,border:`1px solid ${C.roseBd}`},
+    ghost:{background:"transparent",color:C.sl400,border:`1px solid ${C.sl700}`}};
+  return <button onClick={onClick} disabled={disabled} title={title} style={{...base,...v[variant]}}>{children}</button>;
+}
+function StatBox({label,value,sub}){
+  return <div style={{background:C.sl800,border:`1px solid ${C.sl700}`,borderRadius:10,padding:"11px 10px",textAlign:"center",minWidth:74}}>
+    <div style={{fontSize:20,fontWeight:700,color:winClr(value)}}>{value}</div>
+    <div style={{fontSize:10,color:C.sl400,marginTop:2,textTransform:"uppercase",letterSpacing:"0.05em"}}>{label}</div>
+    {sub&&<div style={{fontSize:10,color:C.sl600,marginTop:1}}>{sub}</div>}
+  </div>;
+}
+function ResultBadge({result}){
+  const m={Win:{bg:C.emeraldLo,c:C.emerald},Loss:{bg:C.roseLo,c:C.rose},Draw:{bg:"rgba(100,116,139,.2)",c:C.sl300}};
+  const s=m[result]||m.Draw;
+  return <span style={{background:s.bg,color:s.c,fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:20,whiteSpace:"nowrap"}}>{result}</span>;
+}
+function NavTab({label,active,onClick}){
+  return <button onClick={onClick} style={{padding:"7px 18px",borderRadius:20,fontSize:13,fontWeight:600,
+    border:"none",cursor:"pointer",whiteSpace:"nowrap",transition:"all .2s",
+    background:active?C.amber:"transparent",color:active?"#ffffff":C.sl400,
+    boxShadow:active?`0 2px 12px ${C.amberBd}`:"none"}}>{label}</button>;
+}
+function SectionHeader({title,children}){
+  return <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:8}}>
+    <h2 style={{fontSize:17,fontWeight:700,color:C.sl100}}>{title}</h2>
+    <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>{children}</div>
+  </div>;
+}
+const IS={width:"100%",background:C.sl700,color:C.sl100,border:`1px solid ${C.sl600}`,
+  borderRadius:8,padding:"7px 12px",fontSize:13,outline:"none",fontFamily:"inherit"};
+function Field({label,children}){
+  return <div>
+    <label style={{display:"block",fontSize:11,color:C.sl400,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:4}}>{label}</label>
+    {children}
+  </div>;
+}
+function PosBtns({value,onChange}){
+  const sel=normPos(value);
+  function toggle(key){const next=sel.includes(key)?sel.filter(k=>k!==key):[...sel,key];onChange(next);}
+  return <div style={{display:"flex",gap:4}}>
+    {POS_BTNS.map(({key,label,full})=>{
+      const active=sel.includes(key);
+      return <button key={key} onClick={()=>toggle(key)} title={full}
+        style={{width:30,height:30,borderRadius:7,border:"none",cursor:"pointer",fontSize:12,fontWeight:700,
+          transition:"all .15s",background:active?C.amber:"rgba(71,85,105,.4)",color:active?"#ffffff":C.sl400,
+          boxShadow:active?`0 2px 8px ${C.amberBd}`:"none",transform:active?"scale(1.08)":"scale(1)"}}>{label}</button>;
+    })}
+  </div>;
+}
+function FilterBar({filters,setFilters,players}){
+  return <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+    {[["competition",COMPETITIONS,"Competition"],["venue",VENUES,"Venue"],["result",RESULTS,"Result"],
+      ["player",players.map(p=>p.name),"Player"]].map(([key,opts,ph])=>(
+      <select key={key} value={filters[key]} onChange={e=>setFilters(f=>({...f,[key]:e.target.value}))}
+        style={{background:C.sl800,color:C.sl300,border:`1px solid ${C.sl700}`,borderRadius:8,
+          padding:"6px 10px",fontSize:12,outline:"none",cursor:"pointer"}}>
+        <option value="">All {ph}s</option>
+        {opts.map(o=><option key={o}>{o}</option>)}
+      </select>
+    ))}
+  </div>;
+}
+
+// ── Match Form ────────────────────────────────────────────────
+function MatchForm({players,onSave,onCancel,existing}){
+  const blank={competition:COMPETITIONS[0],format:"Pairs",date:"",venue:"Home",opposition:"",result:"Win",score:"",
+    players:[{name:"",position:"Lead"},{name:"",position:"Skip"}]};
+  const [form,setForm]=useState(existing||blank);
+  function setF(k,v){setForm(f=>{const n={...f,[k]:v};
+    if(k==="format"){const p=POSITIONS[v];n.players=p.map((pos,i)=>({name:f.players[i]?.name||"",position:pos}));}
+    return n;});}
+  function setP(i,k,v){setForm(f=>{const ps=[...f.players];ps[i]={...ps[i],[k]:v};return{...f,players:ps};});}
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.78)",backdropFilter:"blur(4px)",
+      display:"flex",alignItems:"center",justifyContent:"center",zIndex:50,padding:16}}>
+      <div style={{background:C.sl800,border:`1px solid ${C.sl700}`,borderRadius:20,padding:24,
+        width:"100%",maxWidth:480,maxHeight:"92vh",overflowY:"auto"}} className="fade-in">
+        <h2 style={{fontSize:18,fontWeight:700,color:C.amber,marginBottom:16}}>{existing?"Edit Match":"Add Match"}</h2>
+        <div style={{display:"flex",flexDirection:"column",gap:11}}>
+          {[["Competition","competition",COMPETITIONS],["Format","format",FORMATS],
+            ["Venue","venue",VENUES],["Result","result",RESULTS]].map(([lbl,key,opts])=>(
+            <Field key={key} label={lbl}>
+              <select value={form[key]} onChange={e=>setF(key,e.target.value)} style={{...IS,cursor:"pointer"}}>{opts.map(o=><option key={o}>{o}</option>)}</select>
+            </Field>
+          ))}
+          <Field label="Date"><input type="date" value={form.date} onChange={e=>setF("date",e.target.value)} style={IS}/></Field>
+          <Field label="Opposition"><input type="text" value={form.opposition} onChange={e=>setF("opposition",e.target.value)} placeholder="Club name…" style={IS}/></Field>
+          <Field label="Score"><input type="text" value={form.score} onChange={e=>setF("score",e.target.value)} placeholder="e.g. 21-14" style={IS}/></Field>
+          <Field label="Players & Playing Order">
+            {form.players.map((p,i)=>(
+              <div key={i} style={{display:"flex",gap:8,marginBottom:6}}>
+                <select value={p.name} onChange={e=>setP(i,"name",e.target.value)}
+                  style={{flex:1,...IS,width:"auto",cursor:"pointer"}}>
+                  <option value="">Select player…</option>
+                  {players.map(pl=><option key={pl.name}>{pl.name}</option>)}
+                </select>
+                <div style={{background:C.sl600,color:C.sl300,borderRadius:8,padding:"7px 12px",
+                  fontSize:12,minWidth:64,display:"flex",alignItems:"center",justifyContent:"center"}}>{p.position}</div>
+              </div>
+            ))}
+          </Field>
+        </div>
+        <div style={{display:"flex",gap:10,marginTop:18}}>
+          <Btn onClick={()=>onSave(form)}>Save Match</Btn>
+          <Btn variant="secondary" onClick={onCancel}>Cancel</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Matches Tab ───────────────────────────────────────────────
+function MatchesTab({matches,players,onAdd,onEdit,onDelete}){
+  const [showForm,setShowForm]=useState(false);
+  const [editing,setEditing]=useState(null);
+  const [filters,setFilters]=useState({competition:"",venue:"",result:"",player:""});
+  const filtered=matches.filter(m=>
+    (!filters.competition||m.competition===filters.competition)&&
+    (!filters.venue||m.venue===filters.venue)&&
+    (!filters.result||m.result===filters.result)&&
+    (!filters.player||m.players.some(p=>p.name===filters.player))
+  ).sort((a,b)=>b.date.localeCompare(a.date));
+  return(
+    <div className="fade-in">
+      <SectionHeader title={`Match Records (${filtered.length})`}>
+        <Btn variant="export" small onClick={()=>exportMatches(matches)}>⬇ Export CSV</Btn>
+        <Btn small onClick={()=>{setEditing(null);setShowForm(true);}}>+ Add Match</Btn>
+      </SectionHeader>
+      <FilterBar filters={filters} setFilters={setFilters} players={players}/>
+      {filtered.length===0&&<div style={{textAlign:"center",padding:"48px 0",color:C.sl400}}>No matches found.</div>}
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {filtered.map(m=>(
+          <div key={m.id} style={{background:C.sl800,border:`1px solid ${C.sl700}`,borderRadius:14,padding:"14px 16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:4}}>
+                  <ResultBadge result={m.result}/>
+                  <span style={{fontSize:14,fontWeight:700,color:C.sl100}}>{m.competition}</span>
+                  <span style={{fontSize:12,color:C.sl400}}>{m.format}</span>
+                </div>
+                <div style={{fontSize:13,color:C.sl300,marginBottom:2}}>
+                  vs <span style={{color:C.amber,fontWeight:600}}>{m.opposition}</span>
+                  <span style={{color:C.sl400,marginLeft:8}}>{m.venue} · {m.score} · {m.date}</span>
+                </div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:4,marginTop:6}}>
+                  {m.players.map((p,i)=>(
+                    <span key={i} style={{fontSize:11,background:C.sl700,color:C.sl300,padding:"2px 8px",borderRadius:20}}>
+                      {p.name} <span style={{color:C.sl600}}>({p.position})</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:2,flexShrink:0}}>
+                <button onClick={()=>{setEditing(m);setShowForm(true);}} title="Edit"
+                  style={{background:"transparent",border:"none",color:C.sl500,cursor:"pointer",fontSize:16,padding:"3px 7px",borderRadius:6}}>✎</button>
+                <button onClick={()=>onDelete(m.id)} title="Delete"
+                  style={{background:"transparent",border:"none",color:C.sl500,cursor:"pointer",fontSize:16,padding:"3px 7px",borderRadius:6}}>✕</button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+      {showForm&&<MatchForm players={players} existing={editing}
+        onSave={data=>{editing?onEdit({...data,id:editing.id}):onAdd(data);setShowForm(false);setEditing(null);}}
+        onCancel={()=>{setShowForm(false);setEditing(null);}}/>}
+    </div>
+  );
+}
+
+// ── Player Stats Tab ──────────────────────────────────────────
+function PlayerStatsTab({matches,players}){
+  const [selected,setSelected]=useState(null);
+  const stats=useMemo(()=>buildStats(matches),[matches]);
+  const overview=players.map(pl=>{const s=stats[pl.name]||{total:0,wins:0};return{...pl,wins:s.wins,total:s.total};})
+    .sort((a,b)=>(b.total?b.wins/b.total:0)-(a.total?a.wins/a.total:0));
+
+  if(selected){
+    const pl=players.find(p=>p.name===selected)||{name:selected,preferredPos:[]};
+    const s=stats[selected];
+    const prefLbl=normPos(pl.preferredPos).map(posLabel).join(", ")||"None set";
+    if(!s) return <div className="fade-in">
+      <button onClick={()=>setSelected(null)} style={{color:C.amber,background:"none",border:"none",cursor:"pointer",fontSize:13,marginBottom:16}}>← All Players</button>
+      <p style={{color:C.sl400}}>No match data for {selected}.</p>
+    </div>;
+    const partners=Object.entries(s.partners).filter(([,v])=>v.t>0);
+    const best=partners.length?[...partners].sort((a,b)=>(b[1].w/b[1].t)-(a[1].w/a[1].t))[0]:null;
+    const worst=partners.length?[...partners].sort((a,b)=>(a[1].w/a[1].t)-(b[1].w/b[1].t))[0]:null;
+    return(
+      <div className="fade-in">
+        <button onClick={()=>setSelected(null)} style={{color:C.amber,background:"none",border:"none",cursor:"pointer",fontSize:13,marginBottom:16}}>← All Players</button>
+        <div style={{display:"flex",justifyContent:"space-between",flexWrap:"wrap",gap:8,marginBottom:18}}>
+          <div>
+            <h2 style={{fontSize:22,fontWeight:800,color:C.sl100,fontFamily:"'Playfair Display',serif"}}>{selected}</h2>
+            <p style={{fontSize:12,color:C.sl400,marginTop:2}}>{s.total} matches · {s.wins} wins · Preferred: <span style={{color:C.amber}}>{prefLbl}</span></p>
+          </div>
+          <Btn variant="export" small onClick={()=>exportStats(matches,[pl])}>⬇ Export</Btn>
+        </div>
+        <p style={{fontSize:11,color:C.sl500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:8}}>Win Rates by Venue</p>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:18}}>
+          <StatBox label="Overall" value={pct(s.wins,s.total)} sub={`${s.wins}/${s.total}`}/>
+          <StatBox label="Home" value={pct(s.home.w,s.home.t)} sub={`${s.home.w}/${s.home.t}`}/>
+          <StatBox label="Away" value={pct(s.away.w,s.away.t)} sub={`${s.away.w}/${s.away.t}`}/>
+          {s.neutral.t>0&&<StatBox label="Neutral" value={pct(s.neutral.w,s.neutral.t)} sub={`${s.neutral.w}/${s.neutral.t}`}/>}
+        </div>
+        <p style={{fontSize:11,color:C.sl500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:8}}>Win Rate by Position Played</p>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:18}}>
+          {Object.entries(s.positions).map(([pos,v])=><StatBox key={pos} label={pos} value={pct(v.w,v.t)} sub={`${v.w}/${v.t}`}/>)}
+        </div>
+        {partners.length>0&&<>
+          <p style={{fontSize:11,color:C.sl500,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:8}}>Partnership Record</p>
+          <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:16}}>
+            {[...partners].sort((a,b)=>b[1].t-a[1].t).map(([partner,v])=>{
+              const p2=pct(v.w,v.t);
+              return <div key={partner} style={{background:C.sl800,border:`1px solid ${C.sl700}`,borderRadius:10,
+                padding:"9px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:13,color:C.sl200}}>{partner}</span>
+                <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                  <span style={{fontSize:11,color:C.sl500}}>{v.w}/{v.t}</span>
+                  <span style={{fontSize:14,fontWeight:700,color:winClr(p2)}}>{p2}</span>
+                </div>
+              </div>;
+            })}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            {best&&<div style={{background:C.emeraldLo,border:`1px solid ${C.emeraldBd}`,borderRadius:12,padding:12}}>
+              <div style={{fontSize:10,color:C.emerald,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>★ Best Partnership</div>
+              <div style={{fontSize:14,fontWeight:700,color:C.sl100}}>{best[0]}</div>
+              <div style={{fontSize:13,color:C.emerald}}>{pct(best[1].w,best[1].t)}</div>
+            </div>}
+            {worst&&worst[0]!==best?.[0]&&<div style={{background:C.roseLo,border:`1px solid ${C.roseBd}`,borderRadius:12,padding:12}}>
+              <div style={{fontSize:10,color:C.rose,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4}}>⚠ Weakest Partnership</div>
+              <div style={{fontSize:14,fontWeight:700,color:C.sl100}}>{worst[0]}</div>
+              <div style={{fontSize:13,color:C.rose}}>{pct(worst[1].w,worst[1].t)}</div>
+            </div>}
+          </div>
+        </>}
+      </div>
+    );
+  }
+  return(
+    <div className="fade-in">
+      <SectionHeader title="Player Performance">
+        <Btn variant="export" small onClick={()=>exportStats(matches,players)}>⬇ Export All CSV</Btn>
+      </SectionHeader>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {overview.map(({name,preferredPos,wins,total})=>{
+          const p=pct(wins,total);
+          const prefLbl=normPos(preferredPos).join(", ")||"—";
+          return <button key={name} onClick={()=>setSelected(name)}
+            style={{background:C.sl800,border:`1px solid ${C.sl700}`,borderRadius:12,padding:"12px 16px",
+              display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",
+              textAlign:"left",width:"100%",transition:"border-color .15s"}}
+            onMouseEnter={e=>e.currentTarget.style.borderColor=C.amber}
+            onMouseLeave={e=>e.currentTarget.style.borderColor=C.sl700}>
+            <div>
+              <span style={{fontSize:14,fontWeight:600,color:C.sl100}}>{name}</span>
+              {prefLbl!=="—"&&<span style={{fontSize:11,color:C.sl500,marginLeft:8}}>Preferred: <span style={{color:C.amber}}>{prefLbl}</span></span>}
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:11,color:C.sl500}}>{wins}/{total}</span>
+              <span style={{fontSize:14,fontWeight:700,color:winClr(p),minWidth:38,textAlign:"right"}}>{p}</span>
+              <span style={{color:C.sl600}}>›</span>
+            </div>
+          </button>;
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Squad Tab ─────────────────────────────────────────────────
+function PlayersTab({players,onAdd,onRemove,onUpdatePos,onReset}){
+  const [name,setName]=useState("");
+  return(
+    <div className="fade-in">
+      <SectionHeader title={`Squad (${players.length})`}>
+        <Btn variant="export" small onClick={()=>exportSquad(players)}>⬇ Export CSV</Btn>
+      </SectionHeader>
+      <div style={{display:"flex",gap:8,marginBottom:14}}>
+        <input value={name} onChange={e=>setName(e.target.value)}
+          onKeyDown={e=>{if(e.key==="Enter"&&name.trim()){onAdd(name.trim());setName("");}}}
+          placeholder="Player name…"
+          style={{flex:1,...IS,width:"auto"}}/>
+        <Btn onClick={()=>{if(name.trim()){onAdd(name.trim());setName("");}}}>Add Player</Btn>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 160px 28px",gap:8,
+        padding:"2px 14px 6px",borderBottom:`1px solid ${C.sl700}`,marginBottom:8}}>
+        <span style={{fontSize:11,color:C.sl500,textTransform:"uppercase",letterSpacing:"0.05em"}}>Name</span>
+        <span style={{fontSize:11,color:C.sl500,textTransform:"uppercase",letterSpacing:"0.05em"}}>Preferred Position(s)</span>
+        <span/>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:5}}>
+        {players.map(p=>{
+          const lbl=normPos(p.preferredPos).map(posLabel).join(", ")||"None";
+          return <div key={p.name} style={{background:C.sl800,border:`1px solid ${C.sl700}`,borderRadius:12,
+            padding:"10px 14px",display:"grid",gridTemplateColumns:"1fr 160px 28px",gap:8,alignItems:"center"}}>
+            <div>
+              <span style={{fontSize:14,color:C.sl100,fontWeight:500}}>{p.name}</span>
+              <div style={{fontSize:11,color:C.sl500,marginTop:1}}>{lbl}</div>
+            </div>
+            <PosBtns value={p.preferredPos} onChange={pos=>onUpdatePos(p.name,pos)}/>
+            <button onClick={()=>onRemove(p.name)} title="Remove player"
+              style={{background:"transparent",border:"none",color:C.sl600,cursor:"pointer",
+                fontSize:14,padding:"2px 4px",borderRadius:6,transition:"color .15s",lineHeight:1}}
+              onMouseEnter={e=>e.currentTarget.style.color=C.rose}
+              onMouseLeave={e=>e.currentTarget.style.color=C.sl600}>✕</button>
+          </div>;
+        })}
+      </div>
+      <p style={{fontSize:11,color:C.sl600,marginTop:10}}>
+        L = Lead · 2 = Second · 3 = Third · S = Skip. Select as many as apply.
+      </p>
+      <div style={{marginTop:24,borderTop:`1px solid ${C.sl700}`,paddingTop:16}}>
+        <p style={{fontSize:12,color:C.sl500,marginBottom:8}}>⚙️ Database</p>
+        <Btn variant="ghost" small onClick={onReset}>Reset Firebase config</Btn>
+        <p style={{fontSize:11,color:C.sl600,marginTop:6}}>Use this if you need to connect to a different Firebase project.</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Dashboard ─────────────────────────────────────────────────
+function Dashboard({matches}){
+  const total=matches.length,wins=matches.filter(m=>m.result==="Win").length,
+    losses=matches.filter(m=>m.result==="Loss").length,draws=matches.filter(m=>m.result==="Draw").length;
+  const hW=matches.filter(m=>m.venue==="Home"&&m.result==="Win").length,hT=matches.filter(m=>m.venue==="Home").length;
+  const aW=matches.filter(m=>m.venue==="Away"&&m.result==="Win").length,aT=matches.filter(m=>m.venue==="Away").length;
+  const nW=matches.filter(m=>m.venue==="Neutral"&&m.result==="Win").length,nT=matches.filter(m=>m.venue==="Neutral").length;
+  const byComp={};
+  matches.forEach(m=>{if(!byComp[m.competition])byComp[m.competition]={w:0,t:0};byComp[m.competition].t++;if(m.result==="Win")byComp[m.competition].w++;});
+  const recent=[...matches].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,6);
+  return(
+    <div className="fade-in" style={{display:"flex",flexDirection:"column",gap:18}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10}}>
+        {[["Matches",total],["Wins",wins],["Losses",losses],["Win Rate",pct(wins,total)]].map(([l,v])=><StatBox key={l} label={l} value={v}/>)}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+        <div style={{background:C.sl800,border:`1px solid ${C.sl700}`,borderRadius:14,padding:14}}>
+          <div style={{fontSize:11,color:C.sl400,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:10}}>Venue Breakdown</div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <StatBox label="Home" value={pct(hW,hT)} sub={`${hW}/${hT}`}/>
+            <StatBox label="Away" value={pct(aW,aT)} sub={`${aW}/${aT}`}/>
+            {nT>0&&<StatBox label="Neutral" value={pct(nW,nT)} sub={`${nW}/${nT}`}/>}
+          </div>
+        </div>
+        <div style={{background:C.sl800,border:`1px solid ${C.sl700}`,borderRadius:14,padding:14}}>
+          <div style={{fontSize:11,color:C.sl400,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:10}}>By Competition</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {Object.entries(byComp).map(([comp,v])=>{const p=pct(v.w,v.t);return(
+              <div key={comp} style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:12,color:C.sl400,flex:1,paddingRight:8,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{comp}</span>
+                <span style={{fontSize:12,fontWeight:700,color:winClr(p)}}>{p}</span>
+              </div>
+            );})}
+          </div>
+        </div>
+      </div>
+      <div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+          <span style={{fontSize:11,color:C.sl400,textTransform:"uppercase",letterSpacing:"0.05em"}}>Recent Results</span>
+          <Btn variant="export" small onClick={()=>exportDashboard(matches)}>⬇ Export Summary</Btn>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {recent.map(m=>(
+            <div key={m.id} style={{background:C.sl800,border:`1px solid ${C.sl700}`,borderRadius:10,
+              padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+              <div style={{flex:1,minWidth:0}}>
+                <span style={{fontSize:13,fontWeight:600,color:C.sl200}}>{m.opposition}</span>
+                <span style={{fontSize:11,color:C.sl500,marginLeft:8}}>{m.competition} · {m.venue} · {m.date}</span>
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                <span style={{fontSize:11,color:C.sl400}}>{m.score}</span>
+                <ResultBadge result={m.result}/>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ROOT APP
+// ═══════════════════════════════════════════════════════════════
+function App(){
+  const [cfg,setCfg]=useState(()=>loadConfig());
+  const [tab,setTab]=useState("dashboard");
+  const [matches,setMatches]=useState([]);
+  const [players,setPlayers]=useState([]);
+  const [nextId,setNextId]=useState(1);
+  const [toast,setToast]=useState(null);
+  const [syncStatus,setSyncStatus]=useState("busy");
+  const [loaded,setLoaded]=useState(false);
+  const saveTimer=useRef(null);
+
+  function showToast(msg,type="success"){setToast({msg,type,key:Date.now()});}
+
+  // ── Load data from Firestore ──
+  useEffect(()=>{
+    if(!cfg){setLoaded(true);return;}
+    const db=getDb(cfg);
+    if(!db){setLoaded(true);setSyncStatus("err");return;}
+    async function load(){
+      setSyncStatus("busy");
+      try{
+        const [md,pd,meta]=await Promise.all([
+          dbGet(db,"matches"),dbGet(db,"players"),dbGet(db,"meta")
+        ]);
+        if(md?.items?.length) setMatches(md.items);
+        else setMatches(SEED_MATCHES);
+        if(pd?.items?.length) setPlayers(pd.items.map(p=>({...p,preferredPos:normPos(p.preferredPos)})));
+        else setPlayers(SEED_PLAYERS);
+        if(meta?.nextId) setNextId(meta.nextId);
+        else setNextId(SEED_MATCHES.length+1);
+        setSyncStatus("ok");
+      } catch(e){
+        console.error(e);
+        setSyncStatus("err");
+        setMatches(SEED_MATCHES); setPlayers(SEED_PLAYERS);
+        showToast("Could not reach Firebase — check your connection","error");
+      }
+      setLoaded(true);
+    }
+    load();
+  },[cfg]);
+
+  // ── Debounced save ──
+  function scheduleSave(m,p,n){
+    clearTimeout(saveTimer.current);
+    setSyncStatus("busy");
+    saveTimer.current=setTimeout(async()=>{
+      const db=getDb(cfg);
+      if(!db){setSyncStatus("err");return;}
+      try{
+        await Promise.all([
+          dbSet(db,"matches",{items:m,updated:Date.now()}),
+          dbSet(db,"players",{items:p,updated:Date.now()}),
+          dbSet(db,"meta",{nextId:n,updated:Date.now()}),
+        ]);
+        setSyncStatus("ok");
+      } catch(e){
+        setSyncStatus("err");
+        showToast("Firebase save failed — please check connection","error");
+      }
+    },800);
+  }
+
+  function addMatch(data){const nm=[...matches,{...data,id:nextId}],ni=nextId+1;setMatches(nm);setNextId(ni);scheduleSave(nm,players,ni);showToast("Match saved to Firebase ✓");}
+  function editMatch(data){const nm=matches.map(m=>m.id===data.id?data:m);setMatches(nm);scheduleSave(nm,players,nextId);showToast("Match updated ✓");}
+  function deleteMatch(id){if(!confirm("Delete this match?"))return;const nm=matches.filter(m=>m.id!==id);setMatches(nm);scheduleSave(nm,players,nextId);showToast("Match deleted");}
+  function addPlayer(name){if(players.find(p=>p.name===name)){showToast("Player already in squad","error");return;}const np=[...players,{name,preferredPos:[]}];setPlayers(np);scheduleSave(matches,np,nextId);showToast(`${name} added ✓`);}
+  function removePlayer(name){if(!confirm(`Remove ${name} from squad?`))return;const np=players.filter(p=>p.name!==name);setPlayers(np);scheduleSave(matches,np,nextId);}
+  function updatePlayerPos(name,pos){const np=players.map(p=>p.name===name?{...p,preferredPos:pos}:p);setPlayers(np);scheduleSave(matches,np,nextId);}
+  function resetConfig(){if(confirm("Reset Firebase configuration? You will need to re-enter your project details.")){localStorage.removeItem(CONFIG_KEY);_db=null;firebase.apps.forEach(a=>a.delete().catch(()=>{}));setCfg(null);setLoaded(false);}}
+
+  // ── Show setup wizard if no config ──
+  if(!cfg) return <SetupWizard onComplete={c=>{setCfg(c);}}/>;
+
+  // ── Loading screen ──
+  if(!loaded) return(
+    <div style={{minHeight:"100vh",background:C.sl900,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:14}}>
+      <div style={{fontSize:32}}><svg width="64" height="64" viewBox="0 0 64 64"><defs><radialGradient id="bg1" cx="35%" cy="30%" r="65%"><stop offset="0%" stopColor="#c0304a"/><stop offset="55%" stopColor="#800020"/><stop offset="100%" stopColor="#3d0010"/></radialGradient><filter id="bs1"><feDropShadow dx="1" dy="4" stdDeviation="4" floodColor="#000" floodOpacity="0.5"/></filter></defs><ellipse cx="32" cy="35" rx="26" ry="23" fill="url(#bg1)" filter="url(#bs1)"/><ellipse cx="23" cy="42" rx="8" ry="5" fill="rgba(255,255,255,0.1)"/><ellipse cx="24" cy="25" rx="9" ry="6" fill="rgba(255,255,255,0.16)"/><circle cx="40" cy="40" r="5.5" fill="rgba(255,255,255,0.2)" stroke="rgba(255,255,255,0.32)" strokeWidth="1"/></svg></div>
+      <div style={{color:C.sl300,fontSize:15,fontWeight:600}}>Men's Selectors' Portal</div>
+      <div style={{color:C.sl500,fontSize:13}}>Loading data from Firebase…</div>
+    </div>
+  );
+
+  const tabs=[["dashboard","Dashboard"],["matches","Matches"],["stats","Player Stats"],["players","Squad"]];
+  return(
+    <div style={{minHeight:"100vh",background:C.sl900,fontFamily:"'Source Sans 3',sans-serif"}}>
+      <header style={{borderBottom:`1px solid ${C.sl700}`,background:"rgba(15,23,42,.97)",position:"sticky",top:0,zIndex:40,backdropFilter:"blur(10px)"}}>
+        <div style={{maxWidth:820,margin:"0 auto",padding:"13px 20px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:42,height:42,borderRadius:"50%",background:"#3d0010",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:`0 0 20px ${C.amberBd}`,flexShrink:0}}><svg width="32" height="32" viewBox="0 0 32 32"><defs><radialGradient id="bgh" cx="35%" cy="30%" r="65%"><stop offset="0%" stopColor="#c0304a"/><stop offset="55%" stopColor="#800020"/><stop offset="100%" stopColor="#3d0010"/></radialGradient><filter id="bsh"><feDropShadow dx="0.5" dy="2" stdDeviation="2" floodColor="#000" floodOpacity="0.5"/></filter></defs><ellipse cx="16" cy="17" rx="13" ry="11.5" fill="url(#bgh)" filter="url(#bsh)"/><ellipse cx="11.5" cy="21" rx="4" ry="2.5" fill="rgba(255,255,255,0.1)"/><ellipse cx="12" cy="12.5" rx="4.5" ry="3" fill="rgba(255,255,255,0.17)"/><circle cx="20" cy="20" r="2.8" fill="rgba(255,255,255,0.22)" stroke="rgba(255,255,255,0.35)" strokeWidth="0.6"/></svg></div>
+            <div>
+              <div style={{fontSize:17,fontWeight:800,color:C.sl100,fontFamily:"'Playfair Display',serif",lineHeight:1.1}}>Angel Indoor Bowls</div>
+              <div style={{fontSize:10,color:C.amber,letterSpacing:"0.12em",textTransform:"uppercase",marginTop:1}}>Men's Selectors' Portal</div>
+            </div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:11,color:C.sl500,marginBottom:3}}>{matches.length} matches · {players.length} players</div>
+            <SyncStatus status={syncStatus}/>
+          </div>
+        </div>
+      </header>
+      <nav style={{borderBottom:`1px solid ${C.sl700}`,background:"rgba(15,23,42,.85)",position:"sticky",top:71,zIndex:30,backdropFilter:"blur(8px)"}}>
+        <div style={{maxWidth:820,margin:"0 auto",padding:"8px 20px",display:"flex",gap:4,overflowX:"auto"}}>
+          {tabs.map(([id,label])=><NavTab key={id} label={label} active={tab===id} onClick={()=>setTab(id)}/>)}
+        </div>
+      </nav>
+      <main style={{maxWidth:820,margin:"0 auto",padding:"22px 20px 60px"}}>
+        {tab==="dashboard"&&<Dashboard matches={matches}/>}
+        {tab==="matches"&&<MatchesTab matches={matches} players={players} onAdd={addMatch} onEdit={editMatch} onDelete={deleteMatch}/>}
+        {tab==="stats"&&<PlayerStatsTab matches={matches} players={players}/>}
+        {tab==="players"&&<PlayersTab players={players} onAdd={addPlayer} onRemove={removePlayer} onUpdatePos={updatePlayerPos} onReset={resetConfig}/>}
+      </main>
+      <footer style={{borderTop:`1px solid ${C.sl700}`,padding:"14px 20px",textAlign:"center",fontSize:11,color:C.sl600}}>
+        Angel Indoor Bowls · Men's Selectors' Portal · Powered by Google Firebase · All tabs exportable as CSV
+      </footer>
+      {toast&&<Toast key={toast.key} msg={toast.msg} type={toast.type} onDone={()=>setToast(null)}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
